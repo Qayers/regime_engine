@@ -24,15 +24,23 @@ log = config.get_logger("fetch_tiingo")
 TIINGO_URL = "https://api.tiingo.com/tiingo/daily/{ticker}/prices"
 BACKFILL_START = "2024-01-02"  # domyślny początek historii (E3)
 
+# Sentinel: limit zapytań (HTTP 429). Odrębny od None (=błąd) — bo retry NIE ma sensu
+# przy limicie godzinowym (spalałby limit szybciej), a kolejne symbole też dostaną 429.
+RATE_LIMITED = "__RATE_LIMITED__"
+
 
 def _get_json_with_retry(url: str, headers: dict, params: dict, ticker: str):
-    """GET JSON z retry. Zwraca zdeserializowany JSON albo None. Nie loguje tokenu."""
+    """GET JSON z retry. Zwraca JSON | RATE_LIMITED (429, bez retry) | None (błąd). Nie loguje tokenu."""
     last_exc = None
     for attempt in range(config.HTTP_RETRIES):
         try:
             r = requests.get(url, headers=headers, params=params, timeout=config.HTTP_TIMEOUT)
             if r.status_code == 200:
                 return r.json()
+            if r.status_code == 429:
+                # limit — przerwij OD RAZU (retry tylko szybciej spala limit)
+                log.warning("Tiingo HTTP 429 (limit) ticker=%s — przerywam bez retry", ticker)
+                return RATE_LIMITED
             log.warning(
                 "Tiingo HTTP %s (próba %d/%d) ticker=%s",
                 r.status_code, attempt + 1, config.HTTP_RETRIES, ticker,
@@ -99,12 +107,20 @@ def fetch_tiingo(
 
     summary: dict[str, dict] = {}
     any_ok = False
+    rate_limited = False
     global_max_date: Optional[str] = None
 
-    for sym in symbols:
+    for idx, sym in enumerate(symbols):
         url = TIINGO_URL.format(ticker=sym.upper())
         params = {"startDate": start, "endDate": end, "format": "json"}
         data = _get_json_with_retry(url, headers, params, sym)
+        if data == RATE_LIMITED:
+            # limit godzinowy — reszta symboli też dostanie 429; oznacz i przerwij
+            rate_limited = True
+            for rest in symbols[idx:]:
+                summary[rest] = {"rows": 0, "min_date": None, "max_date": None, "status": "rate_limited"}
+            log.warning("Tiingo limit — przerywam po %s, pominięto %d symboli", sym, len(symbols) - idx - 1)
+            break
         if data is None:
             summary[sym] = {"rows": 0, "min_date": None, "max_date": None, "status": "error"}
             continue
@@ -150,6 +166,9 @@ def fetch_tiingo(
         log.info("Tiingo %s: %d wierszy %s..%s", sym, len(rows), mn, mx)
         time.sleep(0.4)
 
+    # source_health = DIAGNOSTYKA na dashboard (NIE wejście do stale_safe — to liczy
+    # engine z MAX(date) per symbol CORE bezpośrednio z tabeli). status rozróżnia limit.
+    status = "ok" if any_ok else ("rate_limited" if rate_limited else "error")
     if update_health:
         with db.get_conn() as conn:
             db.upsert_source_health(
@@ -157,7 +176,7 @@ def fetch_tiingo(
                 "tiingo",
                 datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if any_ok else None,
                 global_max_date,
-                "ok" if any_ok else "error",
+                status,
             )
     return summary
 

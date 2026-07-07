@@ -19,9 +19,11 @@ log = config.get_logger("fetch_finnhub")
 
 FINNHUB_BASE = "https://finnhub.io/api/v1"
 
+RATE_LIMITED = "__RATE_LIMITED__"  # HTTP 429 — przerwij bez retry (patrz fetch_tiingo)
 
-def _get_json_with_retry(path: str, params: dict) -> Optional[dict]:
-    """GET JSON z retry. Zwraca dict albo None. Token przekazywany w params (nie logowany)."""
+
+def _get_json_with_retry(path: str, params: dict):
+    """GET JSON z retry. Zwraca dict | RATE_LIMITED (429) | None (błąd). Token nie logowany."""
     url = f"{FINNHUB_BASE}{path}"
     log_params = {k: v for k, v in params.items() if k != "token"}
     last_exc = None
@@ -30,6 +32,9 @@ def _get_json_with_retry(path: str, params: dict) -> Optional[dict]:
             r = requests.get(url, params=params, timeout=config.HTTP_TIMEOUT)
             if r.status_code == 200:
                 return r.json()
+            if r.status_code == 429:
+                log.warning("Finnhub HTTP 429 (limit) %s — przerywam bez retry", path)
+                return RATE_LIMITED
             log.warning(
                 "Finnhub HTTP %s (próba %d/%d) %s %s",
                 r.status_code, attempt + 1, config.HTTP_RETRIES, path, log_params,
@@ -81,11 +86,16 @@ def fetch_finnhub(watchlist: Optional[list[str]] = None) -> dict:
     e_dates: list[str] = []
     e_from = (today - timedelta(days=7)).strftime("%Y-%m-%d")
     e_to = (today + timedelta(days=35)).strftime("%Y-%m-%d")
+    rate_limited = False
     for sym in watchlist:
         data = _get_json_with_retry(
             "/calendar/earnings",
             {"from": e_from, "to": e_to, "symbol": sym, "token": token},
         )
+        if data == RATE_LIMITED:
+            rate_limited = True
+            log.warning("Finnhub limit — przerywam earnings po %s", sym)
+            break
         if data is None:
             continue
         any_ok = True
@@ -106,7 +116,11 @@ def fetch_finnhub(watchlist: Optional[list[str]] = None) -> dict:
     i_dates: list[str] = []
     i_from = today.strftime("%Y-%m-%d")
     i_to = (today + timedelta(days=30)).strftime("%Y-%m-%d")
-    data = _get_json_with_retry("/calendar/ipo", {"from": i_from, "to": i_to, "token": token})
+    data = None if rate_limited else _get_json_with_retry(
+        "/calendar/ipo", {"from": i_from, "to": i_to, "token": token})
+    if data == RATE_LIMITED:
+        rate_limited = True
+        data = None
     if data is not None:
         any_ok = True
         for rec in data.get("ipoCalendar", []) or []:
@@ -123,13 +137,14 @@ def fetch_finnhub(watchlist: Optional[list[str]] = None) -> dict:
 
     all_dates = e_dates + i_dates
     global_max = max(all_dates) if all_dates else None
+    status = "ok" if any_ok else ("rate_limited" if rate_limited else "error")
     with db.get_conn() as conn:
         db.upsert_source_health(
             conn,
             "finnhub",
             fetched_at if any_ok else None,
             global_max,
-            "ok" if any_ok else "error",
+            status,
         )
 
     return {

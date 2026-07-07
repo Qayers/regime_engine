@@ -19,9 +19,11 @@ log = config.get_logger("fetch_fred")
 
 FRED_URL = "https://api.stlouisfed.org/fred/series/observations"
 
+RATE_LIMITED = "__RATE_LIMITED__"  # HTTP 429 — przerwij bez retry (patrz fetch_tiingo)
 
-def _get_json_with_retry(params: dict) -> Optional[dict]:
-    """GET JSON z retry. Zwraca dict albo None (błąd/wyczerpane próby). Nie loguje klucza."""
+
+def _get_json_with_retry(params: dict):
+    """GET JSON z retry. Zwraca dict | RATE_LIMITED (429) | None (błąd). Nie loguje klucza."""
     safe = params.get("series_id")
     last_exc = None
     for attempt in range(config.HTTP_RETRIES):
@@ -29,6 +31,9 @@ def _get_json_with_retry(params: dict) -> Optional[dict]:
             r = requests.get(FRED_URL, params=params, timeout=config.HTTP_TIMEOUT)
             if r.status_code == 200:
                 return r.json()
+            if r.status_code == 429:
+                log.warning("FRED HTTP 429 (limit) series=%s — przerywam bez retry", safe)
+                return RATE_LIMITED
             # 400/403 zwykle = zły klucz; retry i tak nie pomoże, ale zachowujemy schemat
             log.warning(
                 "FRED HTTP %s (próba %d/%d) series=%s",
@@ -84,9 +89,10 @@ def fetch_fred(
 
     summary: dict[str, dict] = {}
     any_ok = False
+    rate_limited = False
     global_max_date: Optional[str] = None
 
-    for s in series:
+    for idx, s in enumerate(series):
         params = {
             "series_id": s,
             "api_key": config.FRED_API_KEY,
@@ -96,6 +102,12 @@ def fetch_fred(
         }
 
         data = _get_json_with_retry(params)
+        if data == RATE_LIMITED:
+            rate_limited = True
+            for rest in series[idx:]:
+                summary[rest] = {"rows": 0, "min_date": None, "max_date": None, "status": "rate_limited"}
+            log.warning("FRED limit — przerywam po %s, pominięto %d serii", s, len(series) - idx - 1)
+            break
         if data is None or "observations" not in data:
             summary[s] = {"rows": 0, "min_date": None, "max_date": None, "status": "error"}
             log.warning("FRED %s: brak obserwacji w odpowiedzi", s)
@@ -131,6 +143,7 @@ def fetch_fred(
         log.info("FRED %s: %d obserwacji %s..%s", s, len(rows), mn, mx)
         time.sleep(0.4)
 
+    status = "ok" if any_ok else ("rate_limited" if rate_limited else "error")
     if update_health:
         with db.get_conn() as conn:
             db.upsert_source_health(
@@ -138,7 +151,7 @@ def fetch_fred(
                 "fred",
                 datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if any_ok else None,
                 global_max_date,
-                "ok" if any_ok else "error",
+                status,
             )
     return summary
 
