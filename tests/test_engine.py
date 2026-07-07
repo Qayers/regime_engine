@@ -125,3 +125,43 @@ def test_source_health_preserves_last_good_on_failure(tmp_path, monkeypatch):
     assert r["status"] == "rate_limited"
     assert r["last_row_date"] == "2026-07-07"
     assert r["last_success_utc"] == "2026-07-07T21:00:00Z"
+
+
+# --- E6: lock + pipeline end-to-end (bez sieci) ------------------------------
+
+def test_run_daily_lock_mutex(tmp_path, monkeypatch):
+    """Lock jest wzajemnym wykluczeniem: drugi acquire pada, po release znów wolny."""
+    from regime import run_daily
+    monkeypatch.setattr(config, "LOCK_FILE", tmp_path / ".run.lock")
+    assert run_daily._acquire_lock() is True
+    assert run_daily._acquire_lock() is False   # zajęty
+    run_daily._release_lock()
+    assert run_daily._acquire_lock() is True     # znów wolny
+    run_daily._release_lock()
+
+
+def test_engine_end_to_end_seeded(tmp_path, monkeypatch):
+    """Silnik liczy regime_history i zapisuje stan na zaseedowanej bazie (świeże daty)."""
+    import json as _json
+    from datetime import date, timedelta
+    from regime import engine
+    monkeypatch.setattr(config, "DATA_DB", tmp_path / "e2e.sqlite3")
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(config, "STATE_FILE", tmp_path / "regime_state.json")
+    db.init_db()
+    today = date.today()
+    dates = [(today - timedelta(days=59 - i)).isoformat() for i in range(60)]  # kończą się dziś
+    with db.get_conn() as c:
+        for i, dt in enumerate(dates):
+            for sym, base in (("spy", 400.0), ("rsp", 160.0), ("qqq", 350.0), ("iwm", 190.0)):
+                px = base + i * 0.5
+                db.upsert_price(c, sym, dt, px, px, px, px, 1000)
+            db.upsert_macro(c, "BAMLH0A0HYM2", dt, 3.0 + 0.01 * i)
+            db.upsert_macro(c, "VIXCLS", dt, 15.0 + 0.05 * i)
+    res = engine.run_engine(write_state_file=True)
+    assert res["rows"] > 0                                     # są policzone sesje
+    assert res["stale_sources"] == []                          # świeże daty → nie stale
+    st = _json.loads((tmp_path / "regime_state.json").read_text(encoding="utf-8"))
+    assert st["mode"] in ("risk_on", "neutral", "risk_off")
+    assert set(st["components"]) == {"breadth", "credit", "vol", "rotation"}
+    assert st["session_date"] == dates[-1]
