@@ -191,8 +191,10 @@ def upsert_source_health(
         INSERT INTO source_health(source, last_success_utc, last_row_date, status)
         VALUES(?,?,?,?)
         ON CONFLICT(source) DO UPDATE SET
-            last_success_utc=excluded.last_success_utc,
-            last_row_date=excluded.last_row_date, status=excluded.status
+            -- na niepowodzeniu (NULL) zachowaj ostatni znany dobry wiersz/czas; status zawsze świeży
+            last_success_utc=COALESCE(excluded.last_success_utc, source_health.last_success_utc),
+            last_row_date=COALESCE(excluded.last_row_date, source_health.last_row_date),
+            status=excluded.status
         """,
         (source, last_success_utc, last_row_date, status),
     )

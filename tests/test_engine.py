@@ -109,3 +109,19 @@ def test_hysteresis_requires_two_sessions():
     assert m["2026-01-03"][1] == "2026-01-03"     # mode_since = sesja POTWIERDZENIA
     assert m["2026-01-04"][0] == "risk_off"       # powrót: 1 sesja nie wystarcza
     assert m["2026-01-05"][0] == "neutral"        # 2 sesje → zmiana
+
+
+def test_source_health_preserves_last_good_on_failure(tmp_path, monkeypatch):
+    """Niepowodzenie (NULL last_row_date/last_success) NIE kasuje ostatniego dobrego —
+    tylko status sie zmienia (diagnostyka na dashboard ma pokazywac last-known-good)."""
+    test_db = tmp_path / "t.sqlite3"
+    monkeypatch.setattr(config, "DATA_DB", test_db)
+    db.init_db()
+    with db.get_conn() as conn:
+        db.upsert_source_health(conn, "tiingo", "2026-07-07T21:00:00Z", "2026-07-07", "ok")
+        db.upsert_source_health(conn, "tiingo", None, None, "rate_limited")
+    with db.get_conn() as conn:
+        r = conn.execute("SELECT * FROM source_health WHERE source='tiingo'").fetchone()
+    assert r["status"] == "rate_limited"
+    assert r["last_row_date"] == "2026-07-07"
+    assert r["last_success_utc"] == "2026-07-07T21:00:00Z"
