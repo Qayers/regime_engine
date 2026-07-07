@@ -86,7 +86,10 @@ def _htaccess_text() -> str:
             "Require valid-user",
         ]
     else:
-        lines += ["", "# basic-auth wyłączony: HTPASSWD_PATH pusty lub plik nie istnieje"]
+        if htp:  # ustawiony, ale pliku brak = footgun: intencją był auth, a strona jest PUBLICZNA
+            log.warning("HTPASSWD_PATH=%s ustawiony, ale plik NIE ISTNIEJE — dashboard BEZ auth (publiczny)!", htp)
+        reason = "plik nie istnieje" if htp else "pusty"
+        lines += ["", f"# basic-auth wyłączony: HTPASSWD_PATH {reason}"]
     return "\n".join(lines) + "\n"
 
 
@@ -95,14 +98,30 @@ def render_dashboard() -> dict:
     series = _load_series()
     state = _load_state()
     health = _load_source_health()
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     payload = {
-        "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generated_at_utc": now,
+        # progi z configu (NIE zahardkodowane w JS) — dashboard odzwierciedla realne .env
+        "thresholds": {"risk_on": config.RISK_ON_TH, "risk_off": config.RISK_OFF_TH},
         "state": state,
         "source_health": health,
         "series": series,
     }
+    # Okrojony kontrakt maszynowy dla konsumentów: minimalny, stabilny podzbiór stanu
+    # (bez komponentów/historii/wydarzeń). Pełny stan pozostaje w state/regime_state.json.
+    status_public = {
+        "schema_version": state.get("schema_version"),
+        "engine_version": state.get("engine_version"),
+        "generated_at_utc": now,
+        "session_date": state.get("session_date"),
+        "score": state.get("score"),
+        "mode": state.get("mode"),
+        "mode_since": state.get("mode_since"),
+        "stale_sources": state.get("stale_sources", []),
+    }
     pub = config.PUBLIC_DIR
     _atomic_write(pub / "history.json", json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    _atomic_write(pub / "regime_status.json", json.dumps(status_public, ensure_ascii=False, indent=2))
     _atomic_write(pub / "index.html", _INDEX_HTML)
     _atomic_write(pub / ".htaccess", _htaccess_text())
     log.info("DASHBOARD: %d punktów historii → %s (auth=%s)",
@@ -183,7 +202,7 @@ _INDEX_HTML = r"""<!doctype html>
   </section>
 
   <section class="card wide">
-    <h2>Historia score (progi 35 / 65)</h2>
+    <h2 id="chart-h2">Historia score</h2>
     <div id="chart"></div>
   </section>
 
@@ -208,11 +227,12 @@ const MODE = {
 };
 const cssv = k => getComputedStyle(document.documentElement).getPropertyValue(k).trim();
 const esc = s => String(s==null?'':s).replace(/[&<>]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]));
+let TH_ON=35, TH_OFF=65; // domyślne; nadpisywane z payloadu (progi z .env)
 
 function scoreColor(v){ // 0=on(zielony) .. 100=off(czerwony)
   if(v==null) return cssv('--muted');
-  if(v>=65) return cssv('--off');
-  if(v<=35) return cssv('--on');
+  if(v>=TH_OFF) return cssv('--off');
+  if(v<=TH_ON) return cssv('--on');
   return cssv('--neutral');
 }
 
@@ -280,12 +300,12 @@ function renderChart(series){
   const svg=document.createElementNS(NS,'svg'); svg.setAttribute('viewBox','0 0 '+W+' '+H);
   const add=(t,a)=>{const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);svg.appendChild(e);return e;};
   // strefy tła
-  add('rect',{x:PL,y:PT,width:iw,height:y(65)-PT,fill:cssv('--off'),opacity:0.06});
-  add('rect',{x:PL,y:y(35),width:iw,height:PT+ih-y(35),fill:cssv('--on'),opacity:0.06});
-  // linie pomocnicze 0/35/50/65/100
-  [0,35,50,65,100].forEach(g=>{
+  add('rect',{x:PL,y:PT,width:iw,height:y(TH_OFF)-PT,fill:cssv('--off'),opacity:0.06});
+  add('rect',{x:PL,y:y(TH_ON),width:iw,height:PT+ih-y(TH_ON),fill:cssv('--on'),opacity:0.06});
+  // linie pomocnicze 0/próg-on/50/próg-off/100
+  [0,TH_ON,50,TH_OFF,100].forEach(g=>{
     add('line',{x1:PL,y1:y(g),x2:W-PR,y2:y(g),stroke:cssv('--line'),'stroke-width':1,
-      'stroke-dasharray':(g===35||g===65)?'4 3':''});
+      'stroke-dasharray':(g===TH_ON||g===TH_OFF)?'4 3':''});
     add('text',{x:4,y:y(g)+3,fill:cssv('--muted'),'font-size':10}).textContent=g;
   });
   // polyline score
@@ -316,6 +336,8 @@ function renderChart(series){
 }
 
 fetch('history.json',{cache:'no-store'}).then(r=>r.json()).then(d=>{
+  if(d.thresholds){ TH_ON=+d.thresholds.risk_on; TH_OFF=+d.thresholds.risk_off; }
+  document.getElementById('chart-h2').textContent='Historia score (progi '+TH_ON+' / '+TH_OFF+')';
   const st=d.state||{};
   renderState(st);
   renderBars(st.components);

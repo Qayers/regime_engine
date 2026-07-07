@@ -21,8 +21,12 @@ from . import config, dashboard, db, engine, fetch_finnhub, fetch_fred, fetch_ti
 
 log = config.get_logger("run_daily")
 
-FETCH_DAYS = 7          # okno dociągania świeżych sesji (historia już w bazie z backfillu)
 LOCK_STALE_S = 1800     # 30 min — po tym lock uznajemy za osierocony (zawieszony bieg)
+
+# Fetch pełnej historii (full=True), NIE okna days=N. Kluczowe dla odporności: przy przerwie
+# w biegach >N dni (outage / token / brak crona) okno days=N zostawiłoby TRWAŁĄ dziurę w
+# prices_eod — korumpuje mom20/percentyle i nigdy się nie zaleczy. Tiingo/FRED zwracają pełną
+# historię TYM SAMYM 1 zapytaniem/symbol, więc full jest tak samo tani, a samonaprawiający.
 
 
 def _acquire_lock() -> bool:
@@ -71,8 +75,8 @@ def run() -> int:
         return 0
     try:
         db.init_db()
-        _soft("tiingo", lambda: fetch_tiingo.fetch_tiingo(days=FETCH_DAYS))
-        _soft("fred", lambda: fetch_fred.fetch_fred(days=FETCH_DAYS))
+        _soft("tiingo", lambda: fetch_tiingo.fetch_tiingo(full=True))
+        _soft("fred", lambda: fetch_fred.fetch_fred(full=True))
         _soft("finnhub", fetch_finnhub.fetch_finnhub)
 
         # TWARDY: engine musi policzyć stan (na danych z bazy; stale_safe pilnuje świeżości)

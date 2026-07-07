@@ -106,6 +106,11 @@ venv/bin/python -m regime.run_daily      # lock → fetch → engine → dashboa
 Fetchery są **miękkie** (błąd loguje się, bieg trwa — stale_safe zadziała), engine **twardy**.
 Lock (`state/.run.lock`) chroni przed równoległymi biegami; osierocony >30 min jest przejmowany.
 
+Ceny i makro dociągane są **z pełnej historii** (`full=True`), nie oknem N-dni. Powód: przy
+przerwie w biegach dłuższej niż okno (outage / brak crona) okno N-dni zostawiłoby **trwałą dziurę**
+w `prices_eod` (korumpuje mom20/percentyle, nie zaleczy się). Tiingo/FRED zwracają pełną historię
+tym samym 1 zapytaniem/symbol, więc `full` jest tak samo tani, a **samonaprawiający**.
+
 ## Cron
 
 ```cron
@@ -143,10 +148,17 @@ crontab -l | grep regime && diff <(crontab -l) ~/crontab.bak.*  # 4. verify + di
 }
 ```
 
+**`public/regime_status.json`** — **okrojony kontrakt maszynowy** dla konsumentów (HTTP): tylko
+`schema_version, engine_version, generated_at_utc, session_date, score, mode, mode_since, stale_sources`
+(bez komponentów/historii/wydarzeń). Pełny stan pozostaje w `state/regime_state.json`. Live:
+https://regime.uluru.space/regime_status.json
+
 **`public/`** — statyczny dashboard (index.html + history.json + .htaccess), **zero CDN** (wykres to
-inline SVG). Serwowany z docroota subdomeny (`PUBLIC_DIR`). `.htaccess`: `noindex` + `Options -Indexes`
-+ opcjonalny basic-auth (gdy `HTPASSWD_PATH` ustawiony i plik istnieje). Live: https://regime.uluru.space/
-*(obecnie bez auth — dane niewrażliwe, noindex włączony).*
+inline SVG; progi 35/65 czytane z `history.json`, tj. z `.env` — **nie** zahardkodowane). Serwowany z
+docroota subdomeny (`PUBLIC_DIR`). `.htaccess`: `noindex` + `Options -Indexes` + opcjonalny basic-auth
+(gdy `HTPASSWD_PATH` ustawiony i plik istnieje — **jeśli ustawiony, a pliku brak, dashboard loguje
+`WARNING` i pozostaje publiczny**). Live: https://regime.uluru.space/ *(obecnie bez auth — dane
+niewrażliwe, noindex włączony).*
 
 ## Ograniczenia hostingu
 

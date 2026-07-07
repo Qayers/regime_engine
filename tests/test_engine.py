@@ -165,3 +165,15 @@ def test_engine_end_to_end_seeded(tmp_path, monkeypatch):
     assert st["mode"] in ("risk_on", "neutral", "risk_off")
     assert set(st["components"]) == {"breadth", "credit", "vol", "rotation"}
     assert st["session_date"] == dates[-1]
+
+
+def test_htaccess_auth_block(tmp_path, monkeypatch):
+    """.htaccess: brak htpasswd → brak auth; istniejący htpasswd → auth włączony."""
+    from regime import dashboard
+    monkeypatch.setattr(config, "HTPASSWD_PATH", "")
+    assert "Require valid-user" not in dashboard._htaccess_text()
+    htp = tmp_path / ".htpasswd"
+    htp.write_text("u:x\n", encoding="utf-8")
+    monkeypatch.setattr(config, "HTPASSWD_PATH", str(htp))
+    txt = dashboard._htaccess_text()
+    assert "Require valid-user" in txt and str(htp) in txt
