@@ -1,0 +1,19 @@
+# Sekrety i lokalny stan — NIE wersjonować
+.env
+venv/
+data.sqlite3
+data.sqlite3-*
+state/
+logs/
+public/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Artefakty robocze / scratch (nie należą do repo)
+scratch_*.py
+backfill_report.txt
+backfill_wait.log
+.backfill_done
+*.bak
+*.bak.*

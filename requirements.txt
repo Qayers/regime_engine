@@ -1,0 +1,6 @@
+# Zależności runtime silnika reżimu (minimalne — shared hosting).
+# Testowane wersje w nawiasach; brak twardego pinowania dla elastyczności pip.
+requests          # klient HTTP dla fetcherów (Stooq/FRED/Finnhub)  [2.34.x]
+python-dotenv     # wczytanie .env                                   [1.x]
+# pandas — ŚWIADOMIE POMINIĘTE: indicators.py w czystym Pythonie (statistics/math),
+# lżej na CPU/RAM konta współdzielonego. Dodać tylko gdyby realnie upraszczało.

@@ -1,0 +1,3 @@
+# Zależności deweloperskie (testy). Nie instalowane w produkcji przez crona.
+-r requirements.txt
+pytest            # testy jednostkowe logiki (bez sieci, na fixtures)  [8.x]
