@@ -59,6 +59,7 @@ def _atomic_write(path, text: str) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, str(path))
+        os.chmod(str(path), 0o644)  # mkstemp daje 600 → Apache nie odczyta (403); pliki statyczne 644
     except Exception:
         try:
             os.unlink(tmp)
